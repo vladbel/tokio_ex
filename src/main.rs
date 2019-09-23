@@ -4,12 +4,25 @@ extern crate futures;
 //extern crate tokio_core;
 extern crate tokio;
 
+use std::sync::mpsc::channel;
+use std::sync::mpsc::{Sender, Receiver};
 use futures::future::lazy;
+
+const ID_ALL: u8 = 0;
+const ID_ZIPGATEWAY: u8 = 10;
+const ID_HUBCORE: u8 = 12;
+const ID_STDIN: u8 = 14;
+const ID_STDOUT: u8 = 16;
+
+const MESSAGE_TYPE_NONE: u8 = 0;
+const MESSAGE_TYPE_DATA: u8 = 2;
+const MESSAGE_TYPE_COMPLETE_FUTURE u8 = 4;
 
 
 struct ChannelMessage {
     sender_id: u8,
     subscribers: Vec<u8>,
+
     data: Vec::<u8>,
     text: String
 }
@@ -33,7 +46,7 @@ impl ChannelMessage {
                 ID_ZIPGATEWAY => {
                     println! ("Recieved from ZIPGATEWAY: {}", self.text);
                 }
-                ID_STDIO => {
+                ID_STDIN => {
                     println! ("Recieved from STDIO: {}", self.text);
                 }
                 _ => {
@@ -63,8 +76,10 @@ impl SubscriberChannel {
 
 
 
-fn read_stdin () -> Result<(), std::io::Error> {
-
+fn read_stdin (id: u8, 
+               tx_broker: Sender<ChannelMessage>) -> Result<(), ()> {
+    
+    println!("Future start: read STDIN");
     loop {
         let mut input = String::new();
         match std::io::stdin().read_line(&mut input) {
@@ -80,36 +95,84 @@ fn read_stdin () -> Result<(), std::io::Error> {
                     }
                 }
                 if input_length > 0 {
-                    println!("Data: {:02X?}", data);
+                    println!("print from read_stdin: {:02X?}", data);
+                    let mut subscribers = Vec::<u8>::new();
+                    subscribers.push(ID_ALL);
+                    let message = ChannelMessage { sender_id: id, text: input, data: data, subscribers: subscribers};
+                    tx_broker.send(message).unwrap();
                 }
 
             }
             Err(err) => {
                     println!("Error: {}", err);
-                    return Err(err);
+                    //return;
             }
         }
     }
-    println!("Future exit: Exit reading consiole input");
+    println!("Future exit: read STDIN");
+    return Ok(());
+}
 
+
+
+fn broker(rx_broker: Receiver<ChannelMessage>,
+          subscribers: Vec::<SubscriberChannel>) -> Result<(), std::io::Error> {
+        println!("Future start: broker");
+        loop {
+            let message: ChannelMessage = rx_broker.recv().unwrap();
+            for subscriber in &subscribers{
+                if subscriber.id != message.sender_id 
+                    && (message.subscribers.contains(&ID_ALL) 
+                    || message.subscribers.contains(&subscriber.id)) {
+                    subscriber.send(message.clone());
+                }
+            }
+        }
+    println!("Future exit: broker");
+    return Ok(());
+}
+
+fn write_stdout(rx_stdio: Receiver<ChannelMessage>)-> Result<(), std::io::Error>
+{
+    println!("Future start: write STDOUT");
+    loop {
+        let message = rx_stdio.recv().unwrap();
+        message.print();
+    }
+    println!("Future END: write STDOUT");
     return Ok(());
 }
 
 fn main() {
     println!("Started");
 
-    // Thread -based
-    /*
-    let stdio_thread = thread::spawn(move|| {
-        read_stdin();
-    });
-    */
-    //use tokio_core::reactor::Core;
-    //use futures::future::lazy;
-    //use futures::Future;
+    let (tx_brocker, rx_brocker) = channel();
+    let (tx_stdio, rx_stdio) = channel();
 
+    let mut brocker_tx_channels = Vec::<SubscriberChannel>::new();
+    brocker_tx_channels.push( SubscriberChannel{id: ID_STDOUT, tx: tx_stdio.clone()});
+
+    let tx_broker_clone = tx_brocker.clone();
     let stdin_future = lazy(move || {
-        match read_stdin() {
+        match read_stdin(ID_STDIN, tx_broker_clone) {
+            _ => {
+                // noop
+            }
+        }
+        Ok(())
+    });
+
+    let broker_future = lazy(move || {
+        match broker(rx_brocker, brocker_tx_channels) {
+            _ => {
+                // noop
+            }
+        }
+        Ok(())
+    });
+
+    let stdout_future = lazy(move || {
+        match write_stdout(rx_stdio) {
             _ => {
                 // noop
             }
@@ -119,6 +182,8 @@ fn main() {
 
     tokio::run( lazy(move || {
             tokio::spawn(stdin_future );
+            tokio::spawn(broker_future );
+            tokio::spawn(stdout_future );
             Ok(())
         })
     );
