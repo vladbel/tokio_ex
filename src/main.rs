@@ -14,15 +14,14 @@ const ID_HUBCORE: u8 = 12;
 const ID_STDIN: u8 = 14;
 const ID_STDOUT: u8 = 16;
 
-const MESSAGE_TYPE_NONE: u8 = 0;
 const MESSAGE_TYPE_DATA: u8 = 2;
-const MESSAGE_TYPE_COMPLETE_FUTURE u8 = 4;
+const MESSAGE_TYPE_COMPLETE_FUTURE: u8 = 4;
 
 
 struct ChannelMessage {
     sender_id: u8,
     subscribers: Vec<u8>,
-
+    message_type: u8,
     data: Vec::<u8>,
     text: String
 }
@@ -33,6 +32,7 @@ impl ChannelMessage {
             sender_id: self.sender_id, 
             data: self.data.clone(),
             text: self.text.clone(),
+            message_type: self.message_type,
             subscribers: self.subscribers.clone()
         };
     }
@@ -82,11 +82,16 @@ fn read_stdin (id: u8,
     println!("Future start: read STDIN");
     loop {
         let mut input = String::new();
+        let mut subscribers = Vec::<u8>::new();
         match std::io::stdin().read_line(&mut input) {
             Ok(input_length) => {
                 let mut data: Vec::<u8>; // = Vec::<u8>::new();
                 match input.as_ref() {
                     "exit\n" => {
+                        data = Vec::<u8>::new();
+                        subscribers.push(ID_ALL);
+                        let message = ChannelMessage { sender_id: id, message_type: MESSAGE_TYPE_COMPLETE_FUTURE, text: input, data: data, subscribers: subscribers};
+                        tx_broker.send(message).unwrap();
                         break;
                     }
                     _ => {
@@ -96,9 +101,8 @@ fn read_stdin (id: u8,
                 }
                 if input_length > 0 {
                     println!("print from read_stdin: {:02X?}", data);
-                    let mut subscribers = Vec::<u8>::new();
                     subscribers.push(ID_ALL);
-                    let message = ChannelMessage { sender_id: id, text: input, data: data, subscribers: subscribers};
+                    let message = ChannelMessage { sender_id: id, message_type: MESSAGE_TYPE_DATA, text: input, data: data, subscribers: subscribers};
                     tx_broker.send(message).unwrap();
                 }
 
@@ -116,7 +120,7 @@ fn read_stdin (id: u8,
 
 
 fn broker(rx_broker: Receiver<ChannelMessage>,
-          subscribers: Vec::<SubscriberChannel>) -> Result<(), std::io::Error> {
+          subscribers: Vec::<SubscriberChannel>) -> Result<(), ()> {
         println!("Future start: broker");
         loop {
             let message: ChannelMessage = rx_broker.recv().unwrap();
@@ -127,17 +131,35 @@ fn broker(rx_broker: Receiver<ChannelMessage>,
                     subscriber.send(message.clone());
                 }
             }
+            match message.message_type {
+                MESSAGE_TYPE_COMPLETE_FUTURE => {
+                    break;
+                }
+                _ => {
+                    //noop
+                }
+            }
         }
     println!("Future exit: broker");
     return Ok(());
 }
 
-fn write_stdout(rx_stdio: Receiver<ChannelMessage>)-> Result<(), std::io::Error>
+fn write_stdout(rx_stdio: Receiver<ChannelMessage>)-> Result<(), ()>
 {
     println!("Future start: write STDOUT");
     loop {
         let message = rx_stdio.recv().unwrap();
-        message.print();
+
+        match message.message_type {
+            MESSAGE_TYPE_COMPLETE_FUTURE => {
+                break;
+            }
+            _ => {
+                //noop
+                message.print();
+            }
+        }
+
     }
     println!("Future END: write STDOUT");
     return Ok(());
